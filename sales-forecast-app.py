@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 from statsmodels.tsa.statespace.sarimax import SARIMAX
+import statsmodels.api as sm
 import matplotlib.pyplot as plt
 from io import StringIO
 
@@ -10,6 +11,7 @@ def load_data(uploaded_file):
     df = pd.read_csv(StringIO(content))
     df['Date'] = pd.to_datetime(df['Date'])
     df.set_index('Date', inplace=True)
+    # df.Sales= df.Sales.rolling(7).mean()
     return df
 
 def load_events(uploaded_file):
@@ -30,7 +32,7 @@ def prepare_exog_variables(sales_df, events_df):
     return exog_df
 
 def create_sarima_model(data, exog):
-    model = SARIMAX(data, exog=exog, order=(1, 1, 1), seasonal_order=(1, 1, 1, 12))
+    model = SARIMAX(data, exog=exog, order=(1, 1, 2), seasonal_order=(1, 1, 1, 7))
     results = model.fit()
     return results
 
@@ -49,14 +51,18 @@ def main():
         events_df = load_events(events_file)
 
         st.write("Sales Data Preview:")
-        st.write(sales_df.head())
+        st.dataframe(sales_df, use_container_width=True)
 
         st.write("Events Data Preview:")
-        st.write(events_df.head())
+        st.dataframe(events_df,use_container_width=True)
 
         exog_df = prepare_exog_variables(sales_df, events_df)
 
-        model = create_sarima_model(sales_df['Sales'], exog_df)
+        with st.spinner("Prepare model..."):
+            model = create_sarima_model(sales_df['Sales'], exog_df)
+
+        # Get fitted values for training data
+        fitted_values = model.get_prediction(start=sales_df.index[0], end=sales_df.index[-1], exog=exog_df).predicted_mean
 
         forecast_days = 30
         
@@ -66,32 +72,32 @@ def main():
         for event in exog_df.columns:
             future_event_dates = events_df[events_df['Event'] == event]['Date']
             future_exog[event] = future_exog.index.isin(future_event_dates).astype(int)
-
+        
         forecast = forecast_sales(model, forecast_days, future_exog)
 
         # Combine original data and forecast
-        forecast_df = pd.DataFrame({'Date': future_dates, 'Forecast': forecast})
-        forecast_df.set_index('Date', inplace=True)
-        combined_df = pd.concat([sales_df, forecast_df])
+        forecast_df = pd.DataFrame({'Forecast': forecast}, index=future_dates)
+        fitted_df = pd.DataFrame({'Fitted': fitted_values}, index=sales_df.index)
+        combined_df = pd.concat([sales_df, fitted_df, forecast_df], axis=1)
 
-        st.write("Sales Data and Forecast:")
-        fig, ax = plt.subplots(figsize=(12, 6))
+        st.write("Sales Data, Fitted Values, and Forecast:")
+        fig, ax = plt.subplots(figsize=(16, 6))
         ax.plot(sales_df.index, sales_df['Sales'], label='Original Data')
+        ax.plot(fitted_df.index, fitted_df['Fitted'], color='red', label='Fitted Values', alpha=0.5)
         ax.plot(forecast_df.index, forecast_df['Forecast'], color='red', label='Forecast')
         
-        # Plot event markers
         for event in events_df['Event'].unique():
             event_dates = events_df[events_df['Event'] == event]['Date']
             ax.scatter(event_dates, sales_df.loc[event_dates, 'Sales'], marker='o', label=event)
 
         ax.set_xlabel('Date')
         ax.set_ylabel('Sales')
-        ax.set_title('Sales Data and Forecast with Events')
+        ax.set_title('Sales Data, Fitted Values, and Forecast with Events')
         ax.legend()
         st.pyplot(fig)
 
         st.write("Combined Data and Forecast Table:")
-        st.write(combined_df)
+        st.dataframe(combined_df, use_container_width=True)
 
         # Download button for the combined data
         csv = combined_df.to_csv()
@@ -102,19 +108,37 @@ def main():
             mime="text/csv",
         )
 
-        if st.button("Show Model Details"):
-            st.write("Model Summary:")
-            summary = model.summary()
-            st.write(summary)
+        st.write("Model Summary:")
+        summary = model.summary()
+        st.write(summary)
 
-            # Download button for model summary
-            summary_text = str(summary)
-            st.download_button(
-                label="Download Model Summary",
-                data=summary_text,
-                file_name="model_summary.txt",
-                mime="text/plain",
-            )
+        # Download button for model summary
+        summary_text = str(summary)
+        st.download_button(
+            label="Download Model Summary",
+            data=summary_text,
+            file_name="model_summary.txt",
+            mime="text/plain",
+        )
+
+        # 自己相関係数と偏自己相関係数のコレログラムを出力
+        fig,ax = plt.subplots(2,1,figsize=(16,8))
+        fig = sm.graphics.tsa.plot_acf(sales_df.Sales, lags=365, ax=ax[0], color="darkgoldenrod")
+        fig = sm.graphics.tsa.plot_pacf(sales_df.Sales, lags=365, ax=ax[1], color="darkgoldenrod")
+        st.pyplot(fig)
+
+        # トレンド成分と季節成分, 残差を抽出する
+        fig, axes = plt.subplots(4, 1, sharex=True)
+        decomposition = sm.tsa.seasonal_decompose(sales_df.Sales, model ='additive')
+        decomposition.observed.plot(ax=axes[0], legend=False, color='r')
+        axes[0].set_ylabel('Observed')
+        decomposition.trend.plot(ax=axes[1], legend=False, color='g')
+        axes[1].set_ylabel('Trend')
+        decomposition.seasonal.plot(ax=axes[2], legend=False)
+        axes[2].set_ylabel('Seasonal')
+        decomposition.resid.plot(ax=axes[3], legend=False, color='k')
+        axes[3].set_ylabel('Residual')
+        st.pyplot(fig)
 
 if __name__ == "__main__":
     main()
